@@ -1,4 +1,4 @@
-# Supabase + PlanetScale = Fastabase
+# Fastabase
 
 Fastabase is a solution to self-host [Supabase](https://supabase.com/) on AWS and use [PlanetScale Postgres](https://planetscale.com/blog/planetscale-for-postgres) as the database provider.
 
