@@ -1,0 +1,21 @@
+dashboard:
+  organizationName: Default Organization
+  projectName: Default Project
+
+auth:
+  disableSignup: false
+  jwtExpiryLimit: 3600
+  passwordMinLength: 8
+
+email:
+  senderAddress:
+  senderName: Supabase
+
+planetscale:
+  host:
+  port: 5432
+  user:
+  password:
+  database: postgres
+  branchId:
+

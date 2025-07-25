@@ -1,0 +1,4 @@
+[submodule "supabase"]
+	path = supabase
+	url = https://github.com/supabase/supabase
+	shallow = true
