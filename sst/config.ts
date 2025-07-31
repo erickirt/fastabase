@@ -6,9 +6,9 @@ export const configSchema = z.object({
     projectName: z.string().min(1),
   }),
   auth: z.object({
-    disableSignup: z.boolean(),
-    jwtExpiryLimit: z.number(),
-    passwordMinLength: z.number(),
+    disableSignup: z.boolean().default(false),
+    jwtExpiryLimit: z.number().default(3600),
+    passwordMinLength: z.number().default(8),
   }),
   email: z.object({
     senderAddress: z.string().min(1),
@@ -22,6 +22,9 @@ export const configSchema = z.object({
     database: z.string().min(1),
     branchId: z.string().min(1),
   }),
+  openai: z.object({
+    apiKey: z.string().nullable().optional(),
+  }).nullable().optional(),
 });
 
 export type Config = z.infer<typeof configSchema>;

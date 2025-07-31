@@ -13,9 +13,12 @@ email:
 
 planetscale:
   host:
+  # WARNING: do not use 6432 PSBouncer port here, as not all the Supabase services support it.
   port: 5432
   user:
   password:
   database: postgres
   branchId:
 
+openai:
+  apiKey: # optional

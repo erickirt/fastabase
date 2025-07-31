@@ -45,7 +45,7 @@ export default $config({
     const db = new DB({ vpc, config });
     const supabase = new Supabase({ vpc, db, config });
     return {
-      studioUrl: supabase.studio.url,
+      studioUrl: supabase.studioUrl,
       dashboardUser: supabase.dashboardUser,
       dashboardPassword: supabase.dashboardPassword,
     };

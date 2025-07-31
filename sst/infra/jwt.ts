@@ -1,6 +1,6 @@
 export class JWT {
   readonly jwtSecretValue;
-  readonly jwtSecret: aws.secretsmanager.Secret;
+  readonly jwtSecret: aws.ssm.Parameter;
 
   private signJWTFunction;
 
@@ -14,12 +14,10 @@ export class JWT {
         value: this.jwtSecretValue,
       },
     });
-    this.jwtSecret = new aws.secretsmanager.Secret('JWTSecretAWS', {
+    this.jwtSecret = new aws.ssm.Parameter('JWTSecretAWS', {
       name: `/${$app.name}/${$app.stage}/JWTSecret`,
-    });
-    new aws.secretsmanager.SecretVersion('JWTSecretAWSValue', {
-      secretId: this.jwtSecret.id,
-      secretString: this.jwtSecretValue,
+      type: 'SecureString',
+      value: this.jwtSecretValue,
     });
 
     this.signJWTFunction = new sst.aws.Function('SignJWT', {

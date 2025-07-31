@@ -8,7 +8,7 @@ export function sesSmtp({
   workMailEnabled: boolean;
 }): {
     secret: aws.secretsmanager.Secret;
-    host: string;
+    host: $util.Output<string>;
     port: number;
     email: string;
   } {

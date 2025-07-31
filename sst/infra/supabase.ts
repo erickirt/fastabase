@@ -10,7 +10,7 @@ export class Supabase {
   apiExternalUrl: $util.Output<string>;
   dashboardUser: string;
   dashboardPassword: $util.Output<string>;
-  studio: sst.aws.Nextjs;
+  studioUrl: $util.Output<string>;
 
   constructor({
     vpc,
@@ -30,6 +30,7 @@ export class Supabase {
     const storageImageUri = 'public.ecr.aws/supabase/storage-api:v1.24.7';
     const imgproxyImageUri = 'public.ecr.aws/supabase/imgproxy:v3.8.0';
     const postgresMetaImageUri = 'public.ecr.aws/supabase/postgres-meta:v0.89.3';
+    const analyticsImageUri = 'supabase/logflare:1.18.0';
 
     const region = aws.getRegionOutput().name;
 
@@ -115,6 +116,130 @@ export class Supabase {
 
     this.apiExternalUrl = $interpolate`https://${cdn.distribution.domainName}`;
 
+    const sslProxy = new Service('SSLProxy', {
+      cluster,
+      image: {
+        context: 'containers/sslproxy',
+        args: {
+          POSTGRES_HOST: db.postgresCredsData.host,
+          POSTGRES_PORT: `${db.postgresCredsData.port}`,
+        },
+      },
+      port: 5432,
+      additionalPorts: [6432],
+      health: {
+        command: ['CMD-SHELL', 'curl -f http://localhost:9901/ready || exit 1'],
+        interval: '10 seconds',
+        timeout: '5 seconds',
+        retries: 3,
+        startPeriod: '5 seconds',
+      },
+    });
+
+    const logflarePublicAccessTokenValue = new random.RandomPassword('LogflarePublicAccessToken', {
+      length: 128,
+      special: false,
+    }).result;
+    const logflarePublicAccessToken = new aws.ssm.Parameter('LogflarePublicAccessTokenSecret', {
+      name: `/${$app.name}/${$app.stage}/LogflarePublicAccessToken`,
+      type: 'SecureString',
+      value: logflarePublicAccessTokenValue,
+      description: 'Supabase - Logflare Public Access Token',
+    });
+
+    const logflarePrivateAccessTokenValue = new random.RandomPassword('LogflarePrivateAccessToken', {
+      length: 128,
+      special: false,
+    }).result;
+    const logflarePrivateAccessToken = new aws.ssm.Parameter('LogflarePrivateAccessTokenSecret', {
+      name: `/${$app.name}/${$app.stage}/LogflarePrivateAccessToken`,
+      type: 'SecureString',
+      value: logflarePrivateAccessTokenValue,
+      description: 'Supabase - Logflare Private Access Token',
+    });
+
+    const logflarePostgresUrlValue = $interpolate`postgres://${db.postgresCredsData.username}:${db.postgresCredsData.password}@${sslProxy.service}:${sslProxy.port}/_supabase`;
+    const logflarePostgresUrl = new aws.ssm.Parameter('LogflarePostgresUrlSecret', {
+      name: `/${$app.name}/${$app.stage}/LogflarePostgresUrl`,
+      type: 'SecureString',
+      value: logflarePostgresUrlValue,
+      description: 'Supabase - Logflare Postgres URL',
+    });
+
+    const analytics = new Service('Analytics', {
+      cluster,
+      image: analyticsImageUri,
+      port: 4000,
+      health: {
+        command: ['CMD', 'curl', 'http://localhost:4000/health'],
+        timeout: '5 seconds',
+        interval: '5 seconds',
+        retries: 10,
+      },
+      memory: '1 GB',
+      cpu: '0.5 vCPU',
+      environment: {
+        DB_HOSTNAME: sslProxy.service,
+        DB_PORT: $interpolate`${sslProxy.port}`,
+        LOGFLARE_NODE_HOST: '127.0.0.1',
+        DB_DATABASE: '_supabase',
+        DB_SCHEMA: '_analytics',
+        // TODO: enable when service supports SSL correctly
+        // DB_SSL: 'true',
+        LOGFLARE_SINGLE_TENANT: 'true',
+        LOGFLARE_SUPABASE_MODE: 'true',
+        LOGFLARE_MIN_CLUSTER_SIZE: '1',
+        POSTGRES_BACKEND_SCHEMA: '_analytics',
+        LOGFLARE_FEATURE_FLAG_OVERRIDE: 'multibackend=true',
+        LOGFLARE_LOGGER_JSON: 'true',
+        // LOGFLARE_LOG_LEVEL: 'debug',
+      },
+      ssm: {
+        DB_USERNAME: $interpolate`${db.dbSecret.arn}:username::`,
+        // DB_HOSTNAME: $interpolate`${db.dbSecret.arn}:host::`,
+        // DB_PORT: $interpolate`${db.dbSecret.arn}:port::`,
+        DB_PASSWORD: $interpolate`${db.dbSecret.arn}:password::`,
+        LOGFLARE_PUBLIC_ACCESS_TOKEN: logflarePublicAccessToken.arn,
+        LOGFLARE_PRIVATE_ACCESS_TOKEN: logflarePrivateAccessToken.arn,
+        POSTGRES_BACKEND_URL: logflarePostgresUrl.arn,
+      },
+    }, {
+      dependsOn: [db.migrate, sslProxy],
+    });
+
+    const splunkToken = new random.RandomPassword('SplunkToken', {
+      length: 32,
+      special: false,
+    }).result;
+
+    const vector = new Service('Vector', {
+      cluster,
+      image: {
+        context: 'containers/vector',
+        args: {
+          SPLUNK_TOKEN: splunkToken,
+        },
+      },
+      health: {
+        command: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:9001/health'],
+        timeout: '5 seconds',
+        interval: '5 seconds',
+        retries: 3,
+      },
+      port: 8088,
+      environment: {
+        ANALYTICS_HOST: analytics.endpoint,
+      },
+      ssm: {
+        LOGFLARE_PUBLIC_ACCESS_TOKEN: logflarePublicAccessToken.arn,
+      },
+    });
+
+    const splunkConfig = {
+      url: vector.endpoint,
+      token: splunkToken,
+    };
+
     this.dashboardUser = 'admin';
     this.dashboardPassword = new random.RandomPassword('DashboardPassword', {
       length: 32,
@@ -129,27 +254,7 @@ export class Supabase {
       })),
     });
 
-    const supabaseNodeModulesInstall = new command.local.Command('NodeModulesInstall', {
-      create: 'pnpm i',
-      dir: '../../supabase',
-    });
-
-    this.studio = new sst.aws.Nextjs('Studio', {
-      path: 'supabase/apps/studio',
-      vpc: vpc.vpc,
-      environment: {
-        STUDIO_PG_META_URL: $interpolate`${this.apiExternalUrl}/pg`,
-        SUPABASE_URL: this.apiExternalUrl,
-        SUPABASE_PUBLIC_URL: this.apiExternalUrl,
-        POSTGRES_PASSWORD: db.postgresCredsData.password,
-        SUPABASE_ANON_KEY: anonKey.apiKey,
-        SUPABASE_SERVICE_KEY: serviceRoleKey.apiKey,
-        AUTH_JWT_SECRET: jwt.jwtSecretValue,
-        NEXT_PUBLIC_ENABLE_LOGS: 'true',
-        NEXT_ANALYTICS_BACKEND_PROVIDER: 'postgres',
-        DEFAULT_ORGANIZATION_NAME: config.dashboard.organizationName,
-        DEFAULT_PROJECT_NAME: config.dashboard.projectName,
-      },
+    const studioRouter = new sst.aws.Router('StudioRouter', {
       edge: {
         viewerRequest: {
           injection: $interpolate`
@@ -167,9 +272,8 @@ export class Supabase {
       `,
         },
       },
-    }, {
-      dependsOn: [supabaseNodeModulesInstall],
     });
+    this.studioUrl = studioRouter.url;
 
     const auth = new Service('Auth', {
       cluster,
@@ -181,6 +285,7 @@ export class Supabase {
         timeout: '5 seconds',
         retries: 3,
       },
+      splunk: splunkConfig,
       environment: {
         GOTRUE_API_HOST: '0.0.0.0',
         GOTRUE_API_PORT: '9999',
@@ -188,7 +293,7 @@ export class Supabase {
 
         GOTRUE_DB_DRIVER: 'postgres',
 
-        GOTRUE_SITE_URL: this.studio.url,
+        GOTRUE_SITE_URL: studioRouter.url,
         GOTRUE_URI_ALLOW_LIST: redirectUrls,
         GOTRUE_DISABLE_SIGNUP: config.auth.disableSignup.toString(),
 
@@ -227,12 +332,15 @@ export class Supabase {
         GOTRUE_SMTP_USER: $interpolate`${smtp.secret.arn}:username::`,
         GOTRUE_SMTP_PASS: $interpolate`${smtp.secret.arn}:password::`,
       },
+    }, {
+      dependsOn: [vector],
     });
 
     const rest = new Service('Rest', {
       cluster,
       image: restImageUri,
       port: 3000,
+      splunk: splunkConfig,
       environment: {
         PGRST_DB_SCHEMAS: 'public,storage,graphql_public',
         PGRST_DB_ANON_ROLE: 'anon',
@@ -244,19 +352,19 @@ export class Supabase {
         PGRST_JWT_SECRET: jwt.jwtSecret.arn,
         PGRST_APP_SETTINGS_JWT_SECRET: jwt.jwtSecret.arn,
       },
+    }, {
+      dependsOn: [vector],
     });
 
     const cookieSigningSecretValue = new random.RandomPassword('CookieSigningSecretValue', {
       length: 64,
       special: false,
     }).result;
-    const cookieSigningSecret = new aws.secretsmanager.Secret('CookieSigningSecret', {
+    const cookieSigningSecret = new aws.ssm.Parameter('CookieSigningSecret', {
       name: `/${$app.name}/${$app.stage}/CookieSigningSecret`,
+      type: 'SecureString',
+      value: cookieSigningSecretValue,
       description: 'Supabase - Cookie Signing Secret for Realtime',
-    });
-    new aws.secretsmanager.SecretVersion('CookieSigningSecretVersion', {
-      secretId: cookieSigningSecret.id,
-      secretString: cookieSigningSecretValue,
     });
 
     const storageBucket = new sst.aws.Bucket('StorageBucket');
@@ -297,6 +405,7 @@ export class Supabase {
         timeout: '5 seconds',
         retries: 3,
       },
+      splunk: splunkConfig,
       link: [storageBucket],
       environment: {
         POSTGREST_URL: rest.endpoint,
@@ -320,6 +429,8 @@ export class Supabase {
         DATABASE_URL: $interpolate`${supabaseStorageAdminSecret.secret.arn}:uri::`,
         WEBHOOK_API_KEY: cdn.cacheManager.apiKey.arn,
       },
+    }, {
+      dependsOn: [vector],
     });
 
     const meta = new Service('Meta', {
@@ -341,7 +452,7 @@ export class Supabase {
       dependsOn: [db.migrate],
     });
 
-    // Only allow access to Kong from the load balancer
+    // Only allow access to Kong from the load balancer and its own VPC
     const kongSecurityGroup = new aws.ec2.SecurityGroup('KongSecurityGroup', {
       vpcId: vpc.vpc.id,
       ingress: [
@@ -349,7 +460,7 @@ export class Supabase {
           protocol: 'tcp',
           fromPort: 8000,
           toPort: 8000,
-          securityGroups: [loadBalancer.defaultSecurityGroup.apply((sg) => sg!.id)],
+          securityGroups: [loadBalancer.defaultSecurityGroup.apply((sg) => sg!.id), vpc.vpc.nodes.securityGroup.id],
           description: 'Kong',
         },
         {
@@ -384,6 +495,7 @@ export class Supabase {
         timeout: '5 seconds',
         retries: 3,
       },
+      splunk: splunkConfig,
       environment: {
         KONG_DNS_ORDER: 'LAST,A,CNAME',
         KONG_PLUGINS: 'request-transformer,cors,key-auth,acl,basic-auth,opentelemetry',
@@ -400,6 +512,7 @@ export class Supabase {
         SUPABASE_REST_URL: rest.endpoint,
         SUPABASE_STORAGE_URL: storage.endpoint,
         SUPABASE_META_HOST: meta.endpoint,
+        SUPABASE_ANALYTICS_URL: analytics.endpoint,
       },
       ssm: {
         SUPABASE_ANON_KEY: anonKey.ssmParameter.arn,
@@ -418,6 +531,43 @@ export class Supabase {
           }],
         },
       },
+    }, {
+      dependsOn: [vector],
+    });
+
+    const supabaseNodeModulesInstall = new command.local.Command('NodeModulesInstall', {
+      create: 'pnpm i',
+      dir: '../../supabase',
+    });
+
+    const studio = new sst.aws.Nextjs('Studio', {
+      path: 'supabase/apps/studio',
+      vpc: vpc.vpc,
+      router: {
+        instance: studioRouter,
+      },
+      server: {
+        runtime: 'nodejs22.x',
+        architecture: 'arm64',
+      },
+      environment: {
+        STUDIO_PG_META_URL: $interpolate`${this.apiExternalUrl}/pg`,
+        SUPABASE_URL: kong.endpoint,
+        SUPABASE_PUBLIC_URL: this.apiExternalUrl,
+        POSTGRES_PASSWORD: db.postgresCredsData.password,
+        SUPABASE_ANON_KEY: anonKey.apiKey,
+        SUPABASE_SERVICE_KEY: serviceRoleKey.apiKey,
+        AUTH_JWT_SECRET: jwt.jwtSecretValue,
+        LOGFLARE_PRIVATE_ACCESS_TOKEN: logflarePrivateAccessTokenValue,
+        LOGFLARE_URL: analytics.endpoint,
+        NEXT_PUBLIC_ENABLE_LOGS: 'true',
+        NEXT_ANALYTICS_BACKEND_PROVIDER: 'postgres',
+        DEFAULT_ORGANIZATION_NAME: config.dashboard.organizationName,
+        DEFAULT_PROJECT_NAME: config.dashboard.projectName,
+        ...(config.openai?.apiKey ? { OPENAI_API_KEY: config.openai.apiKey } : {}),
+      },
+    }, {
+      dependsOn: [supabaseNodeModulesInstall],
     });
   }
 }

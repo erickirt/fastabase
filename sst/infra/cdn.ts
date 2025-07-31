@@ -2,7 +2,7 @@ export class CDN {
   readonly distribution: aws.cloudfront.Distribution;
   readonly cacheManager: {
     url: $util.Output<string>;
-    apiKey: aws.secretsmanager.Secret;
+    apiKey: aws.ssm.Parameter;
   };
 
   constructor({ loadBalancer }: { loadBalancer: aws.lb.LoadBalancer | $util.Output<aws.lb.LoadBalancer> }) {
@@ -104,13 +104,11 @@ export class CDN {
       length: 32,
       special: false,
     }).result;
-    const cacheManagerApiKey = new aws.secretsmanager.Secret('CacheManagerApiKeySecret', {
+    const cacheManagerApiKey = new aws.ssm.Parameter('CacheManagerApiKeySecret', {
       name: `/${$app.name}/${$app.stage}/cache-manager-api-key`,
+      type: 'SecureString',
+      value: cacheManagerApiKeyString,
       description: 'Supabase - API key for CDN cache manager',
-    });
-    new aws.secretsmanager.SecretVersion( 'CacheManagerApiKeyVersion', {
-      secretId: cacheManagerApiKey.id,
-      secretString: cacheManagerApiKeyString,
     });
 
     const queue = new sst.aws.Queue('CacheManagerQueue');

@@ -56,13 +56,21 @@ export class DB {
     });
   }
 
-  genUserPassword(username: string, { noSsl = false }: { noSsl?: boolean } = {}): {
-    password: $util.Output<string>;
-    secret: aws.secretsmanager.Secret;
-  } {
+  genUserPassword(username: string, {
+    noSsl = false,
+    psBouncer = false,
+  }: {
+    noSsl?: boolean;
+    psBouncer?: boolean;
+  } = {}): {
+      password: $util.Output<string>;
+      secret: aws.secretsmanager.Secret;
+    } {
     const secret = new aws.secretsmanager.Secret(`DBUser-${username}-Password`, {
       name: `/${$app.name}/${$app.stage}/DBUser/${username}`,
       description: `Supabase - Database User ${username}`,
+    }, {
+      dependsOn: [this.migrate],
     });
     const password = new random.RandomPassword(`DBUser-${username}-Password`, {
       length: 32,
@@ -73,7 +81,7 @@ export class DB {
       secretString: password.apply((password) => JSON.stringify({
         username,
         password,
-        uri: `postgres://${username}.${this.postgresCredsData.psBranchId}:${password}@${this.postgresCredsData.host}:${this.postgresCredsData.port}/${this.postgresCredsData.dbname}${noSsl ? '' : '?sslmode=verify-full'}`,
+        uri: `postgres://${username}.${this.postgresCredsData.psBranchId}:${password}@${this.postgresCredsData.host}:${psBouncer ? 6432 : this.postgresCredsData.port}/${this.postgresCredsData.dbname}${noSsl ? '' : '?sslmode=verify-full'}`,
       })),
     });
 
